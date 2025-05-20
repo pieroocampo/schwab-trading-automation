@@ -127,9 +127,9 @@ for symbol in TICKERS:
 
     action = ""
     if existing:
-        action = f"Replace order {existing['orderId']} ➔ STOP @ {mavg20:.2f}"
+        action = f"Replace order {existing['orderId']} ➔ STOP @ {exit_price:.2f}"
     else:
-        action = f"Place new STOP sell order for {symbol} x{qty} @ {mavg20:.2f}"
+        action = f"Place new STOP sell order for {symbol} x{qty} @ {exit_price:.2f}"
 
     if dry_run:
         print(f"[DRY RUN] {action}")
