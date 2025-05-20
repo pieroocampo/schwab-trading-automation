@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from requests_oauthlib import OAuth2Session
 import os
+import json
 
 # === CONFIG ===
 load_dotenv()  # reads .env into os.environ
@@ -17,8 +18,9 @@ CLIENT_SECRET = os.getenv("SCHWAB_CLIENT_SECRET")
 
 CALLBACK_URL  = os.getenv("CALLBACK_URL")
 TOKEN_PATH    = 'token.json'
-TICKERS       = ["NCLH", "EPAM", "WB", "TRMB", "VLO", "F", "VBTX", "ACHR"]
-dry_run       = False   # <-- Set to False to actually submit
+TICKERS       = ["NCLH", "EPAM", "WB", "TRMB", "VLO", "F", "VBTX", "ACHR","NVDA","VLO","ISRG","FSLY", "DBRG", "ADBE", "DOUG", "NNBR", "STOK"]
+dry_run       = False  # <-- Set to False to actually submit
+debug         = False  # <-- Set to True to enable debug prints
 
 # === CLIENT SETUP ===
 client = easy_client(
@@ -39,8 +41,18 @@ resp = client.get_account(
 
 positions = resp.get("securitiesAccount", {}).get("positions", [])
 
-open_orders_response = client.get_orders_for_account(acct_hash).json()
-open_orders = [order for order in open_orders_response if order.get("status") == "OPEN" or order.get("status") == "AWAITING_STOP_CONDITION"]
+raw_orders = client.get_orders_for_account(acct_hash).json()
+# Normalize raw_orders into a list
+orders_list = raw_orders if isinstance(raw_orders, list) else raw_orders.get("data", raw_orders)
+if debug:
+    print(f"DEBUG raw orders count: {len(orders_list)}")
+    # Debug each order's status and remaining quantity
+    for o in orders_list:
+        print(f"DEBUG order {o.get('orderId')} status={o.get('status')} remaining={o.get('remainingQuantity')}")
+# Consider an order open if it has any remaining quantity
+open_orders = [o for o in orders_list if o.get("remainingQuantity", 0) > 0]
+if debug:
+    print(f"DEBUG open orders count: {len(open_orders)}")
 
 for symbol in TICKERS:
     # 1) How many shares
@@ -61,16 +73,54 @@ for symbol in TICKERS:
     # 3) Compute 20-day MA
     start = datetime.utcnow() - timedelta(days=30)
     hist  = client.get_price_history_every_day(symbol, start_datetime=start).json()
-    closes = closes = [c['close'] for c in hist.get('candles', [])][-20:]
-    mavg20 = sum(closes)/len(closes)
-    mavg20_str = f"{mavg20:.2f}"
+    candles = hist.get('candles', [])
 
-    # 4) Build STOP market @ MA, GTC
+    # unpack raw series
+    highs   = [c['high']  for c in candles]
+    lows    = [c['low']   for c in candles]
+    closes  = [c['close'] for c in candles]
+
+    # 1) 20-day SMA (for reference/filter)
+    mavg20   = sum(closes[-20:]) / 20
+
+    # 2) 10-day EMA (fast breakdown filter)
+    ema_period = 10
+    alpha      = 2 / (ema_period + 1)
+    # seed EMA on the first of the window
+    ema = closes[-ema_period]
+    for price in closes[-ema_period+1:]:
+        ema = alpha * price + (1 - alpha) * ema
+    ema10 = ema
+
+    # 3) ATR(14) – Average True Range
+    trs = []
+    for i in range(1, len(candles)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i]  - closes[i-1])
+        )
+        trs.append(tr)
+    atr14 = sum(trs[-14:]) / 14
+
+    # 4) Chandelier Exit (22-day high minus 3×ATR)
+    highest_high    = max(highs[-22:])
+    chandelier_exit = highest_high - 3 * atr14
+
+    # 5) Choose your final stop: for example,
+    #    - bail on a quick EMA break, or
+    #    - give it room with the chandelier exit
+    exit_price = max(ema10, chandelier_exit)
+
+    # format as string (schwab-py deprecation warning fix)
+    exit_str = f"{exit_price:.2f}"
+
+    # --- then build your order spec using exit_str instead of mavg20_str ---
     spec = (
-        equity_sell_limit(symbol, qty, mavg20_str)
+        equity_sell_limit(symbol, qty, exit_str)
         .set_order_type(OrderType.STOP)
         .clear_price()
-        .set_stop_price(mavg20_str)
+        .set_stop_price(exit_str)
         .set_duration(Duration.GOOD_TILL_CANCEL)
         .build()
     )
@@ -85,8 +135,16 @@ for symbol in TICKERS:
         print(f"[DRY RUN] {action}")
     else:
         if existing:
-            order_resp = client.replace_order(acct_hash, existing['orderId'], spec)
-            print(f"Replaced order {existing['orderId']} for {symbol}")
+            try:
+                resp = client.replace_order(acct_hash, existing['orderId'], spec)
+                print(f"REPLACE_ORDER RESPONSE: {resp.status_code} - {resp.text}")
+                print(f"Replaced order for {symbol} at stop price {exit_str}")
+            except Exception as e:
+                print(f"Error replacing order for {symbol}: {e}")
         else:
-            client.place_order(acct_hash, spec)
-            print(f"Placed new stop order for {symbol}")
+            try:
+                resp = client.place_order(acct_hash, spec)
+                print(f"PLACE_ORDER RESPONSE: {resp.status_code} - {resp.text}")
+                print(f"Placed new stop order for {symbol} at stop price {exit_str}")
+            except Exception as e:
+                print(f"Error placing order for {symbol}: {e}")
