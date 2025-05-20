@@ -6,19 +6,15 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from requests_oauthlib import OAuth2Session
 import os
-import json
 
 # === CONFIG ===
 load_dotenv()  # reads .env into os.environ
 CLIENT_ID     = os.getenv("SCHWAB_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SCHWAB_CLIENT_SECRET")
 
-#AUTH_URL      = "https://api.schwabapi.com/v1/oauth/authorize"
-#TOKEN_URL     = "https://api.schwabapi.com/v1/oauth/token"
-
 CALLBACK_URL  = os.getenv("CALLBACK_URL")
 TOKEN_PATH    = 'token.json'
-TICKERS       = ["NCLH", "EPAM", "WB", "TRMB", "VLO", "F", "VBTX", "ACHR","NVDA","VLO","ISRG","FSLY", "DBRG", "ADBE", "DOUG", "NNBR", "STOK"]
+TICKERS       = ["NCLH", "EPAM", "WB", "TRMB", "VLO", "F", "VBTX", "ACHR","NVDA","VLO","DBRG", "ADBE", "DOUG", "NNBR", "STOK","IIF"]
 dry_run       = False  # <-- Set to False to actually submit
 debug         = False  # <-- Set to True to enable debug prints
 
