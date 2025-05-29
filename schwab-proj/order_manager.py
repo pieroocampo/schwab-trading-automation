@@ -14,8 +14,9 @@ CLIENT_SECRET = os.getenv("SCHWAB_CLIENT_SECRET")
 
 CALLBACK_URL  = os.getenv("CALLBACK_URL")
 TOKEN_PATH    = 'token.json'
-TICKERS       = ["NCLH", "EPAM", "WB", "TRMB", "VLO", "F", "VBTX", "ACHR","NVDA","VLO","DBRG", "ADBE", "DOUG", "NNBR", "STOK","IIF"]
-dry_run       = False  # <-- Set to False to actually submit
+TICKERS       = ["WB","DBRG","IMNM","TSLA","PDYN","ALTS"]
+
+dry_run       = False # <-- Set to False to actually submit
 debug         = False  # <-- Set to True to enable debug prints
 
 # === CLIENT SETUP ===
@@ -123,9 +124,9 @@ for symbol in TICKERS:
 
     action = ""
     if existing:
-        action = f"Replace order {existing['orderId']} ➔ STOP @ {exit_price:.2f}"
+        action = f"Replace order for {symbol}. {existing['orderId']} ➔ STOP @ {exit_price:.2f}. EMA10={ema10:.2f}, chandelier_exit={chandelier_exit:.2f}"
     else:
-        action = f"Place new STOP sell order for {symbol} x{qty} @ {exit_price:.2f}"
+        action = f"Place new STOP sell order for {symbol} x{qty} @ {exit_price:.2f}. EMA10={ema10:.2f}, chandelier_exit={chandelier_exit:.2f}"
 
     if dry_run:
         print(f"[DRY RUN] {action}")
@@ -134,13 +135,13 @@ for symbol in TICKERS:
             try:
                 resp = client.replace_order(acct_hash, existing['orderId'], spec)
                 print(f"REPLACE_ORDER RESPONSE: {resp.status_code} - {resp.text}")
-                print(f"Replaced order for {symbol} at stop price {exit_str}")
+                print(f"Replaced order for {symbol} at stop price {exit_str}. EMA10={ema10:.2f}, chandelier_exit={chandelier_exit:.2f}")
             except Exception as e:
                 print(f"Error replacing order for {symbol}: {e}")
         else:
             try:
                 resp = client.place_order(acct_hash, spec)
                 print(f"PLACE_ORDER RESPONSE: {resp.status_code} - {resp.text}")
-                print(f"Placed new stop order for {symbol} at stop price {exit_str}")
+                print(f"Placed new stop order for {symbol} at stop price {exit_str}.  EMA10={ema10:.2f}, chandelier_exit={chandelier_exit:.2f}")
             except Exception as e:
                 print(f"Error placing order for {symbol}: {e}")
