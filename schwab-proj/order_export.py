@@ -1,6 +1,27 @@
 import os, csv, json
 from schwab.auth import easy_client
 from dotenv import load_dotenv
+from datetime import datetime
+from databricks.sdk import WorkspaceClient
+
+def upload_export_to_databricks():
+    """
+    Uploads the filled_orders.csv file to Databricks.
+    This function is a placeholder and should be implemented based on your Databricks setup.
+    """
+    w = WorkspaceClient(profile="mypharos")
+    remote_path = "/Volumes/workspace/default/landing/filled_orders.csv"
+    with open("filled_orders.csv", "rb") as input_stream:
+        w.files.upload(remote_path, input_stream, overwrite=True)
+
+def trigger_databricks_job():
+    """
+    Triggers a Databricks job to process the uploaded CSV file.
+    This function is a placeholder and should be implemented based on your Databricks job setup.
+    """
+    w = WorkspaceClient(profile="mypharos")
+    job_id = 939121727711316
+    w.jobs.run_now(job_id)
 
 load_dotenv()
 client = easy_client(
@@ -19,16 +40,21 @@ resp = client.get_orders_for_account(acct_hash)
 print("DEBUG HTTP", resp.status_code)
 raw = resp.json()
 
-# 3) dump the structure so you can inspect exactly where 'FILLED' lives
-print(json.dumps(raw, indent=2))  
-# ↳ run this, look in your console for where the orders array is,
-#    then note whether it's raw["data"], raw["orders"], or raw itself.
-
 # 4) normalize into a list
 orders_list = raw if isinstance(raw, list) else raw.get("data", raw.get("orders", []))
 
+ # Only include orders entered on or after April 1, 2025
+cutoff = datetime.fromisoformat("2025-04-01T00:00:00+00:00")
+
 # 5) filter for filled orders
-filled = [o for o in orders_list if o.get("status") == "FILLED"]
+filled = []
+for o in orders_list:
+    if o.get("status") != "FILLED":
+        continue
+    # parse enteredTime (convert +0000 to +00:00 for fromisoformat)
+    entered = datetime.fromisoformat(o["enteredTime"].replace("+0000", "+00:00"))
+    if entered >= cutoff:
+        filled.append(o)
 print(f"DEBUG found {len(filled)} FILLED orders")
 
 # 6) write CSV of each execution leg, including instruction column
@@ -55,3 +81,8 @@ with open("filled_orders.csv", "w", newline="") as f:
                     ])
 
 print(f"Wrote {len(filled)} orders to filled_orders.csv")
+
+upload_export_to_databricks()
+trigger_databricks_job()
+
+print("Uploaded filled_orders.csv to Databricks and triggered job.")

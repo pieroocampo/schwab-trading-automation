@@ -1,4 +1,4 @@
-from schwab.auth import easy_client, OAuth2Client
+from schwab.auth import easy_client
 from schwab.client import Client
 from schwab.orders.common import OrderType, Duration
 from schwab.orders.equities import equity_sell_limit
@@ -14,10 +14,10 @@ CLIENT_SECRET = os.getenv("SCHWAB_CLIENT_SECRET")
 
 CALLBACK_URL  = os.getenv("CALLBACK_URL")
 TOKEN_PATH    = 'token.json'
-TICKERS       = ["WB","DBRG","IMNM","TSLA","PDYN","ALTS"]
+TICKERS       = ["NVDA","OTLY","TIXT",'ATYR','COIN','CIFR','CMPS','DOMH','AMD']
 
 dry_run       = False # <-- Set to False to actually submit
-debug         = False  # <-- Set to True to enable debug prints
+debug         = False  # <-- Set to True to enable debug
 
 # === CLIENT SETUP ===
 client = easy_client(
@@ -53,7 +53,8 @@ if debug:
 
 for symbol in TICKERS:
     # 1) How many shares
-    pos = next((p for p in positions if p['instrument']['symbol'] == symbol), None)
+    pos = next((p for p in positions if p['instrument']['assetType'] != "COLLECTIVE_INVESTMENT" 
+                and p['instrument']['symbol'] == symbol), None)
     qty = (pos.get('longQuantity', 0) - pos.get('shortQuantity', 0)) if pos else 0
     if qty <= 0:
         print(f"{symbol}: no shares owned, skipping.")
