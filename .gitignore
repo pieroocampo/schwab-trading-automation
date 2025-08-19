@@ -1,3 +1,7 @@
 schwab-proj/.env
 token.json
 filled_orders.csv
+IMPROVEMENTS.md
+last_execution.json
+*.log
+*.pyc
