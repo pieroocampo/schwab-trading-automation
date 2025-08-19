@@ -1,0 +1,21 @@
+# Core dependencies for Schwab Trading Automation
+# Requires Python 3.9+ (for zoneinfo module)
+
+# Schwab API client
+schwab-py>=1.5.0
+
+# Databricks SDK for file uploads and job triggering
+databricks-sdk>=0.43.0
+
+# Environment variable management  
+python-dotenv>=1.1.0
+
+# Additional Databricks packages (optional, for advanced features)
+databricks-connect>=14.0.0
+databricks-sql-connector>=3.7.0
+
+# Optional: For better pandas support (if needed for data analysis)
+# pandas>=2.0.0
+
+# Optional: For enhanced data validation (if needed)
+# pydantic>=2.0.0
