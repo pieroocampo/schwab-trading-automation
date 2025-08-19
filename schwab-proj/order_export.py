@@ -2,7 +2,8 @@ import csv
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
 
 from schwab.auth import easy_client
 from databricks.sdk import WorkspaceClient
@@ -66,6 +67,7 @@ class OrderExporter:
         self.config = config
         self.client = self._initialize_client()
         self.account_hash = self._get_account_hash()
+        self.execution_state_file = "last_execution.json"
     
     def _initialize_client(self):
         """Initialize Schwab client with error handling"""
@@ -92,10 +94,66 @@ class OrderExporter:
             logger.error(f"Failed to get account hash: {e}")
             raise
     
-    def get_all_orders(self) -> List[Dict]:
-        """Fetch all orders from account"""
+    def _load_last_execution_date(self) -> Optional[datetime]:
+        """Load the last execution date from state file"""
         try:
-            resp = self.client.get_orders_for_account(self.account_hash)
+            if Path(self.execution_state_file).exists():
+                with open(self.execution_state_file, 'r') as f:
+                    state = json.load(f)
+                    last_date = state.get('last_execution_date')
+                    if last_date:
+                        return datetime.fromisoformat(last_date)
+        except Exception as e:
+            logger.warning(f"Failed to load last execution date: {e}")
+        return None
+    
+    def _save_execution_date(self, execution_date: datetime) -> bool:
+        """Save the current execution date to state file"""
+        try:
+            state = {
+                'last_execution_date': execution_date.isoformat(),
+                'last_updated': datetime.now().isoformat()
+            }
+            with open(self.execution_state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+            logger.info(f"Saved execution date: {execution_date.isoformat()}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save execution date: {e}")
+            return False
+    
+    def _get_date_range(self) -> tuple[datetime, datetime]:
+        """Get the date range for order extraction"""
+        # Current execution time
+        to_date = datetime.now()
+        
+        # Load last execution date
+        last_execution = self._load_last_execution_date()
+        
+        if last_execution:
+            from_date = last_execution
+            logger.info(f"Using incremental extraction from {from_date.isoformat()} to {to_date.isoformat()}")
+        else:
+            # First run - use cutoff date from config but respect 60-day API limit
+            config_cutoff = datetime.fromisoformat(self.config.cutoff_date)
+            sixty_days_ago = to_date - timedelta(days=60)
+            from_date = max(config_cutoff, sixty_days_ago)
+            logger.info(f"First run - extracting from {from_date.isoformat()} to {to_date.isoformat()}")
+        
+        return from_date, to_date
+    
+    def get_all_orders(self) -> List[Dict]:
+        """Fetch orders from account using incremental date range"""
+        try:
+            # Get date range for this execution
+            from_date, to_date = self._get_date_range()
+            
+            # API call with date range
+            resp = self.client.get_orders_for_account(
+                self.account_hash,
+                from_entered_datetime=from_date,
+                to_entered_datetime=to_date
+            )
             logger.debug(f"Orders API response status: {resp.status_code}")
             
             if resp.status_code != 200:
@@ -196,20 +254,33 @@ class OrderExporter:
         """Main export process"""
         logger.info("Starting order export process")
         
+        # Record execution start time
+        execution_start = datetime.now()
+        
         # Get all orders
         all_orders = self.get_all_orders()
         if not all_orders:
-            logger.error("No orders retrieved")
-            return False
+            logger.warning("No orders retrieved for the specified date range")
+            # Still consider this successful and save execution date
+            self._save_execution_date(execution_start)
+            return True
         
         # Filter for filled orders
         filled_orders = self.filter_filled_orders(all_orders)
         if not filled_orders:
             logger.warning("No filled orders found matching criteria")
-            return True  # Not an error, just no data
+            # Still consider this successful and save execution date
+            self._save_execution_date(execution_start)
+            return True
         
         # Write to CSV
-        return self.write_orders_to_csv(filled_orders)
+        success = self.write_orders_to_csv(filled_orders)
+        
+        # Save execution date only if write was successful
+        if success:
+            self._save_execution_date(execution_start)
+        
+        return success
 
 class OrderExportManager:
     """Main manager for the complete export and upload process"""
@@ -218,6 +289,21 @@ class OrderExportManager:
         self.config = config
         self.exporter = OrderExporter(config)
         self.databricks = DatabricksManager(config)
+    
+    def _has_orders_to_upload(self) -> bool:
+        """Check if CSV file exists and has order data (more than just header)"""
+        try:
+            if not Path(self.config.output_file).exists():
+                return False
+            
+            with open(self.config.output_file, 'r') as f:
+                lines = f.readlines()
+                # File should have header + at least one data row
+                return len(lines) > 1
+                
+        except Exception as e:
+            logger.warning(f"Failed to check CSV file content: {e}")
+            return False
     
     def run(self) -> bool:
         """Execute the complete export process"""
@@ -228,6 +314,14 @@ class OrderExportManager:
             if not self.exporter.export_orders():
                 logger.error("Failed to export orders")
                 return False
+            
+            # Check if we have orders to upload
+            if not self._has_orders_to_upload():
+                logger.info("No orders found in export - skipping Databricks upload and job trigger")
+                logger.info("Export process completed successfully (no new data)")
+                return True
+            
+            logger.info(f"Orders found in {self.config.output_file} - proceeding with Databricks operations")
             
             # Upload to Databricks
             if not self.databricks.upload_file(

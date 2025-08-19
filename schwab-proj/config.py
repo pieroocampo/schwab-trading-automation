@@ -53,7 +53,7 @@ class TradingConfig(SchwabAPIConfig):
     def __post_init__(self):
         super().__post_init__()
         if self.tickers is None:
-            self.tickers = ['PH']
+            self.tickers = []
         
         # Validate technical indicator periods
         if self.sma_period <= 0:
@@ -71,7 +71,7 @@ class ExportConfig(SchwabAPIConfig):
     """Configuration for order export operations"""
     # File settings
     output_file: str = "filled_orders.csv"
-    cutoff_date: str = "2025-04-01T00:00:00+00:00"
+    cutoff_date: str = "2025-08-16T00:00:00+00:00"  # Within Schwab API 60-day limit
     
     # Databricks settings
     databricks_profile: str = "mypharos"
@@ -127,7 +127,7 @@ def load_trading_config() -> TradingConfig:
     load_dotenv()
     
     # Parse tickers from comma-separated string
-    tickers_str = os.getenv("TICKERS", "PH")
+    tickers_str = os.getenv("TICKERS")
     tickers = [ticker.strip() for ticker in tickers_str.split(",") if ticker.strip()]
     
     return TradingConfig(
@@ -165,7 +165,7 @@ def load_export_config() -> ExportConfig:
         
         # Export settings
         output_file=os.getenv("OUTPUT_FILE", "filled_orders.csv"),
-        cutoff_date=os.getenv("CUTOFF_DATE", "2025-04-01T00:00:00+00:00"),
+        cutoff_date=os.getenv("CUTOFF_DATE", "2024-06-15T00:00:00+00:00"),
         
         # Databricks settings
         databricks_profile=os.getenv("DATABRICKS_PROFILE", "mypharos"),
