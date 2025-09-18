@@ -50,6 +50,12 @@ class TradingConfig(SchwabAPIConfig):
     max_daily_trades: int = 10
     min_price: float = 1.0  # Minimum stock price to trade
     
+    # Adaptive stop parameters
+    profit_threshold: float = 0.05  # 5% profit to switch to aggressive trailing
+    loss_threshold: float = -0.03   # 3% loss to tighten stops
+    max_loss_percent: float = 0.05  # 5% maximum loss per position
+    breakeven_buffer: float = 0.01  # 1% buffer around breakeven
+    
     def __post_init__(self):
         super().__post_init__()
         if self.tickers is None:
@@ -149,7 +155,13 @@ def load_trading_config() -> TradingConfig:
         # Risk management
         max_position_size=float(os.getenv("MAX_POSITION_SIZE", "10000.0")),
         max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "10")),
-        min_price=float(os.getenv("MIN_PRICE", "1.0"))
+        min_price=float(os.getenv("MIN_PRICE", "1.0")),
+        
+        # Adaptive stop parameters
+        profit_threshold=float(os.getenv("PROFIT_THRESHOLD", "0.05")),
+        loss_threshold=float(os.getenv("LOSS_THRESHOLD", "-0.03")),
+        max_loss_percent=float(os.getenv("MAX_LOSS_PERCENT", "0.05")),
+        breakeven_buffer=float(os.getenv("BREAKEVEN_BUFFER", "0.01"))
     )
 
 

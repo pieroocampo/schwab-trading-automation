@@ -179,6 +179,23 @@ class TradingManager:
                     and p['instrument']['symbol'] == symbol), None)
         return (pos.get('longQuantity', 0) - pos.get('shortQuantity', 0)) if pos else 0
     
+    def get_position_info(self, symbol: str, positions: List[Dict]) -> Tuple[float, Optional[float]]:
+        """Get position quantity and average cost"""
+        pos = next((p for p in positions if p['instrument']['assetType'] != "COLLECTIVE_INVESTMENT" 
+                    and p['instrument']['symbol'] == symbol), None)
+        
+        if not pos:
+            return 0, None
+        
+        quantity = pos.get('longQuantity', 0) - pos.get('shortQuantity', 0)
+        avg_cost = pos.get('averagePrice', None)
+        
+        # Log position details for debugging
+        if self.config.debug and quantity > 0:
+            logger.debug(f"{symbol}: Position quantity={quantity}, avg_cost={avg_cost}")
+        
+        return quantity, avg_cost
+    
     def find_existing_sell_order(self, symbol: str, open_orders: List[Dict]) -> Optional[Dict]:
         """Find existing sell order for a symbol"""
         return next(
@@ -188,19 +205,55 @@ class TradingManager:
             None
         )
     
-    def calculate_exit_price(self, market_data: MarketData) -> Tuple[float, float, float]:
-        """Calculate exit price using technical indicators"""
+    def calculate_exit_price(self, market_data: MarketData, current_price: float = None, 
+                           avg_cost: float = None) -> Tuple[float, float, float, str]:
+        """Calculate adaptive exit price based on position P&L"""
         try:
-            # Calculate indicators
+            # Calculate base indicators
             ema = TechnicalIndicators.exponential_moving_average(
                 market_data.closes, self.config.ema_period)
             chandelier = TechnicalIndicators.chandelier_exit(
                 market_data, self.config.chandelier_period, self.config.chandelier_multiplier)
             
-            # Choose the higher of EMA or Chandelier Exit
-            exit_price = max(ema, chandelier)
+            # Use latest close if current_price not provided
+            if current_price is None:
+                current_price = market_data.closes[-1]
             
-            return exit_price, ema, chandelier
+            # Adaptive logic based on position P&L
+            if avg_cost is not None:
+                unrealized_pnl_pct = (current_price - avg_cost) / avg_cost
+                
+                if unrealized_pnl_pct >= self.config.profit_threshold:
+                    # Winning trade - use aggressive trailing stop (lower of the two)
+                    exit_price = min(ema, chandelier)
+                    strategy = "WINNER_TRAILING"
+                    logger.debug(f"{market_data.symbol}: Using WINNER_TRAILING strategy. "
+                               f"P&L: {unrealized_pnl_pct:.1%}, Stop: min({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
+                    
+                elif unrealized_pnl_pct <= self.config.loss_threshold:
+                    # Losing trade - cut losses early with tight stop
+                    tight_stop = avg_cost * (1 - self.config.max_loss_percent)  # Max loss protection
+                    conservative_stop = min(ema, chandelier)  # More aggressive of the two indicators
+                    exit_price = max(conservative_stop, tight_stop)
+                    strategy = "LOSS_CUTTING"
+                    logger.debug(f"{market_data.symbol}: Using LOSS_CUTTING strategy. "
+                               f"P&L: {unrealized_pnl_pct:.1%}, Stop: max({conservative_stop:.2f}, {tight_stop:.2f}) = {exit_price:.2f}")
+                    
+                else:
+                    # Break-even zone - use conservative approach
+                    exit_price = max(ema, chandelier)
+                    strategy = "BREAKEVEN_CONSERVATIVE"
+                    logger.debug(f"{market_data.symbol}: Using BREAKEVEN_CONSERVATIVE strategy. "
+                               f"P&L: {unrealized_pnl_pct:.1%}, Stop: max({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
+            else:
+                # Fallback to original logic if no cost basis available
+                exit_price = max(ema, chandelier)
+                strategy = "DEFAULT_CONSERVATIVE"
+                logger.debug(f"{market_data.symbol}: Using DEFAULT_CONSERVATIVE strategy (no cost basis). "
+                           f"Stop: max({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
+            
+            return exit_price, ema, chandelier, strategy
+            
         except Exception as e:
             logger.error(f"Failed to calculate exit price for {market_data.symbol}: {e}")
             raise
@@ -218,14 +271,17 @@ class TradingManager:
         )
     
     def execute_order_action(self, symbol: str, quantity: float, exit_price: float, 
-                           ema: float, chandelier: float, existing_order: Optional[Dict]) -> bool:
+                           ema: float, chandelier: float, existing_order: Optional[Dict], 
+                           strategy: str = "DEFAULT") -> bool:
         """Execute order placement or replacement"""
         spec = self.create_stop_order(symbol, quantity, exit_price)
         
         if existing_order:
-            action = f"Replace order for {symbol}. {existing_order['orderId']} ➔ STOP @ {exit_price:.2f}. EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}"
+            action = f"Replace order for {symbol}. {existing_order['orderId']} ➔ STOP @ {exit_price:.2f}. " \
+                    f"Strategy={strategy}, EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}"
         else:
-            action = f"Place new STOP sell order for {symbol} x{quantity} @ {exit_price:.2f}. EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}"
+            action = f"Place new STOP sell order for {symbol} x{quantity} @ {exit_price:.2f}. " \
+                    f"Strategy={strategy}, EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}"
         
         if self.config.dry_run:
             logger.info(f"[DRY RUN] {action}")
@@ -235,11 +291,13 @@ class TradingManager:
             if existing_order:
                 resp = self.client.replace_order(self.account_hash, existing_order['orderId'], spec)
                 logger.info(f"REPLACE_ORDER RESPONSE: {resp.status_code} - {resp.text}")
-                logger.info(f"Replaced order for {symbol} at stop price {exit_price:.2f}. EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}")
+                logger.info(f"Replaced order for {symbol} at stop price {exit_price:.2f}. "
+                           f"Strategy={strategy}, EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}")
             else:
                 resp = self.client.place_order(self.account_hash, spec)
                 logger.info(f"PLACE_ORDER RESPONSE: {resp.status_code} - {resp.text}")
-                logger.info(f"Placed new stop order for {symbol} at stop price {exit_price:.2f}. EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}")
+                logger.info(f"Placed new stop order for {symbol} at stop price {exit_price:.2f}. "
+                           f"Strategy={strategy}, EMA10={ema:.2f}, chandelier_exit={chandelier:.2f}")
             
             return resp.status_code < 400
         except Exception as e:
@@ -250,8 +308,8 @@ class TradingManager:
         """Process trading logic for a single symbol"""
         logger.info(f"Processing symbol: {symbol}")
         
-        # Check position quantity
-        quantity = self.get_position_quantity(symbol, positions)
+        # Get position info including cost basis
+        quantity, avg_cost = self.get_position_info(symbol, positions)
         if quantity <= 0:
             logger.info(f"{symbol}: no shares owned, skipping.")
             return True
@@ -265,15 +323,28 @@ class TradingManager:
         # Find existing order
         existing_order = self.find_existing_sell_order(symbol, open_orders)
         
-        # Calculate exit price
+        # Calculate adaptive exit price
         try:
-            exit_price, ema, chandelier = self.calculate_exit_price(market_data)
+            current_price = market_data.closes[-1]
+            exit_price, ema, chandelier, strategy = self.calculate_exit_price(
+                market_data, current_price, avg_cost)
+            
+            # Log the strategy being used and P&L info
+            if avg_cost:
+                pnl_pct = (current_price - avg_cost) / avg_cost
+                unrealized_pnl = (current_price - avg_cost) * quantity
+                logger.info(f"{symbol}: Strategy={strategy}, P&L={pnl_pct:.1%} (${unrealized_pnl:.2f}), "
+                           f"Current=${current_price:.2f}, Avg_Cost=${avg_cost:.2f}, "
+                           f"Stop=${exit_price:.2f}")
+            else:
+                logger.info(f"{symbol}: Strategy={strategy}, Current=${current_price:.2f}, Stop=${exit_price:.2f}")
+        
         except Exception as e:
             logger.error(f"Failed to calculate exit price for {symbol}: {e}")
             return False
         
-        # Execute order action
-        return self.execute_order_action(symbol, quantity, exit_price, ema, chandelier, existing_order)
+        # Execute order action with strategy info
+        return self.execute_order_action(symbol, quantity, exit_price, ema, chandelier, existing_order, strategy)
     
     def run(self) -> bool:
         """Main execution method"""

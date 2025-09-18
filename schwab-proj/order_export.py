@@ -110,9 +110,10 @@ class OrderExporter:
     def _save_execution_date(self, execution_date: datetime) -> bool:
         """Save the current execution date to state file"""
         try:
+            from datetime import timezone
             state = {
                 'last_execution_date': execution_date.isoformat(),
-                'last_updated': datetime.now().isoformat()
+                'last_updated': datetime.now(timezone.utc).isoformat()
             }
             with open(self.execution_state_file, 'w') as f:
                 json.dump(state, f, indent=2)
@@ -124,18 +125,27 @@ class OrderExporter:
     
     def _get_date_range(self) -> tuple[datetime, datetime]:
         """Get the date range for order extraction"""
-        # Current execution time
-        to_date = datetime.now()
+        from datetime import timezone
+        
+        # Current execution time with timezone awareness
+        to_date = datetime.now(timezone.utc)
         
         # Load last execution date
         last_execution = self._load_last_execution_date()
         
         if last_execution:
             from_date = last_execution
+            # Ensure timezone consistency - all dates should be UTC
+            if from_date.tzinfo is None:
+                from_date = from_date.replace(tzinfo=timezone.utc)
             logger.info(f"Using incremental extraction from {from_date.isoformat()} to {to_date.isoformat()}")
         else:
             # First run - use cutoff date from config but respect 60-day API limit
             config_cutoff = datetime.fromisoformat(self.config.cutoff_date)
+            # Ensure config cutoff is timezone-aware
+            if config_cutoff.tzinfo is None:
+                config_cutoff = config_cutoff.replace(tzinfo=timezone.utc)
+            
             sixty_days_ago = to_date - timedelta(days=60)
             from_date = max(config_cutoff, sixty_days_ago)
             logger.info(f"First run - extracting from {from_date.isoformat()} to {to_date.isoformat()}")
@@ -171,34 +181,31 @@ class OrderExporter:
             return []
     
     def filter_filled_orders(self, orders: List[Dict]) -> List[Dict]:
-        """Filter orders for filled status and date cutoff"""
+        """Filter orders for filled status only - date filtering already handled by API"""
         try:
-            cutoff = datetime.fromisoformat(self.config.cutoff_date)
             filled_orders = []
+            total_orders = len(orders)
+            status_counts = {}
             
             for order in orders:
-                if order.get("status") != "FILLED":
+                status = order.get("status", "UNKNOWN")
+                status_counts[status] = status_counts.get(status, 0) + 1
+                
+                if status != "FILLED":
                     continue
                 
-                # Parse entered time (handle timezone format variations)
+                # Validate that the order has an enteredTime (for logging purposes)
                 entered_time_str = order.get("enteredTime", "")
                 if not entered_time_str:
                     logger.warning(f"Order {order.get('orderId')} missing enteredTime")
                     continue
                 
-                try:
-                    # Convert +0000 to +00:00 for fromisoformat compatibility
-                    normalized_time = entered_time_str.replace("+0000", "+00:00")
-                    entered = datetime.fromisoformat(normalized_time)
-                    
-                    if entered >= cutoff:
-                        filled_orders.append(order)
-                        
-                except ValueError as e:
-                    logger.warning(f"Failed to parse time for order {order.get('orderId')}: {e}")
-                    continue
+                filled_orders.append(order)
             
-            logger.info(f"Found {len(filled_orders)} filled orders after {self.config.cutoff_date}")
+            # Log status breakdown for debugging
+            status_summary = ", ".join([f"{status}: {count}" for status, count in status_counts.items()])
+            logger.info(f"Order status breakdown from {total_orders} total orders: {status_summary}")
+            logger.info(f"Found {len(filled_orders)} filled orders")
             return filled_orders
             
         except Exception as e:
@@ -254,31 +261,35 @@ class OrderExporter:
         """Main export process"""
         logger.info("Starting order export process")
         
-        # Record execution start time
-        execution_start = datetime.now()
+        # Get date range for this execution
+        from_date, to_date = self._get_date_range()
         
         # Get all orders
         all_orders = self.get_all_orders()
         if not all_orders:
             logger.warning("No orders retrieved for the specified date range")
-            # Still consider this successful and save execution date
-            self._save_execution_date(execution_start)
+            # Save execution end time to ensure no gaps in next run
+            from datetime import timezone
+            self._save_execution_date(datetime.now(timezone.utc))
             return True
         
-        # Filter for filled orders
+        # Filter for filled orders (date filtering already handled by API)
         filled_orders = self.filter_filled_orders(all_orders)
         if not filled_orders:
             logger.warning("No filled orders found matching criteria")
-            # Still consider this successful and save execution date
-            self._save_execution_date(execution_start)
+            # Save execution end time to ensure no gaps in next run  
+            from datetime import timezone
+            self._save_execution_date(datetime.now(timezone.utc))
             return True
         
         # Write to CSV
         success = self.write_orders_to_csv(filled_orders)
         
         # Save execution date only if write was successful
+        # Use current time to ensure we don't miss any orders in next run
         if success:
-            self._save_execution_date(execution_start)
+            from datetime import timezone
+            self._save_execution_date(datetime.now(timezone.utc))
         
         return success
 
