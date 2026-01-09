@@ -16,7 +16,7 @@ logger = setup_logging(logging_config, 'trading.log')
 
 @dataclass
 class MarketData:
-    """Container for market data"""
+    """Container for market data""" 
     symbol: str
     highs: List[float]
     lows: List[float]
@@ -74,7 +74,7 @@ class TechnicalIndicators:
             raise ValueError(f"Not enough data points. Need {period}, got {len(market_data.highs)}")
         
         highest_high = max(market_data.highs[-period:])
-        atr = TechnicalIndicators.average_true_range(market_data, 14)  # Standard ATR period
+        atr = TechnicalIndicators.average_true_range(market_data, 10)  
         
         return highest_high - multiplier * atr
 
