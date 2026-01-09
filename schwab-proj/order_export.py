@@ -360,6 +360,9 @@ class OrderExportManager:
                 logger.error("Failed to trigger Databricks job")
                 return False
             
+            # Delete the CSV file after successful upload and job trigger to prevent duplicates
+            self._delete_uploaded_file()
+            
             logger.info("Order export and upload completed successfully")
             return True
             
