@@ -316,6 +316,19 @@ class OrderExportManager:
             logger.warning(f"Failed to check CSV file content: {e}")
             return False
     
+    def _delete_uploaded_file(self) -> bool:
+        """Delete the CSV file after successful upload to prevent duplicate uploads"""
+        try:
+            file_path = Path(self.config.output_file)
+            if file_path.exists():
+                file_path.unlink()
+                logger.info(f"Deleted {self.config.output_file} after successful upload")
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to delete {self.config.output_file}: {e}")
+            return False
+    
     def run(self) -> bool:
         """Execute the complete export process"""
         logger.info("Starting order export and upload process")
