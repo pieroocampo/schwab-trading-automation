@@ -41,6 +41,7 @@ class TradingConfig(SchwabAPIConfig):
     # Technical indicator parameters
     sma_period: int = 20
     ema_period: int = 10
+    breakeven_ema_period: int = 5  # EMA period for breakeven stops (using lows)
     atr_period: int = 14
     chandelier_period: int = 22
     chandelier_multiplier: float = 3.0
@@ -66,6 +67,8 @@ class TradingConfig(SchwabAPIConfig):
             raise ValueError("SMA period must be positive")
         if self.ema_period <= 0:
             raise ValueError("EMA period must be positive")
+        if self.breakeven_ema_period <= 0:
+            raise ValueError("Breakeven EMA period must be positive")
         if self.atr_period <= 0:
             raise ValueError("ATR period must be positive")
         if self.chandelier_period <= 0:
@@ -148,6 +151,7 @@ def load_trading_config() -> TradingConfig:
         # Technical indicators
         sma_period=int(os.getenv("SMA_PERIOD", "20")),
         ema_period=int(os.getenv("EMA_PERIOD", "10")),
+        breakeven_ema_period=int(os.getenv("BREAKEVEN_EMA_PERIOD", "5")),
         atr_period=int(os.getenv("ATR_PERIOD", "14")),
         chandelier_period=int(os.getenv("CHANDELIER_PERIOD", "22")),
         chandelier_multiplier=float(os.getenv("CHANDELIER_MULTIPLIER", "3.0")),

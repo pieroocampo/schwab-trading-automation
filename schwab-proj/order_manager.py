@@ -156,7 +156,8 @@ class TradingManager:
                 return None
             
             # Validate we have enough data for calculations
-            min_required = max(self.config.sma_period, self.config.ema_period, 
+            min_required = max(self.config.sma_period, self.config.ema_period,
+                             self.config.breakeven_ema_period,
                              self.config.atr_period + 1, self.config.chandelier_period)
             
             if len(candles) < min_required:
@@ -205,13 +206,15 @@ class TradingManager:
             None
         )
     
-    def calculate_exit_price(self, market_data: MarketData, current_price: float = None, 
-                           avg_cost: float = None) -> Tuple[float, float, float, str]:
+    def calculate_exit_price(self, market_data: MarketData, current_price: float = None,
+                           avg_cost: float = None) -> Tuple[float, float, float, float, str]:
         """Calculate adaptive exit price based on position P&L"""
         try:
             # Calculate base indicators
             ema = TechnicalIndicators.exponential_moving_average(
                 market_data.closes, self.config.ema_period)
+            breakeven_ema = TechnicalIndicators.exponential_moving_average(
+                market_data.lows, self.config.breakeven_ema_period)
             chandelier = TechnicalIndicators.chandelier_exit(
                 market_data, self.config.chandelier_period, self.config.chandelier_multiplier)
             
@@ -240,11 +243,11 @@ class TradingManager:
                                f"P&L: {unrealized_pnl_pct:.1%}, Stop: max({conservative_stop:.2f}, {tight_stop:.2f}) = {exit_price:.2f}")
                     
                 else:
-                    # Break-even zone - use conservative approach
-                    exit_price = max(ema, chandelier)
+                    # Break-even zone - use conservative approach with EMA of lows
+                    exit_price = max(breakeven_ema, chandelier)
                     strategy = "BREAKEVEN_CONSERVATIVE"
                     logger.debug(f"{market_data.symbol}: Using BREAKEVEN_CONSERVATIVE strategy. "
-                               f"P&L: {unrealized_pnl_pct:.1%}, Stop: max({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
+                               f"P&L: {unrealized_pnl_pct:.1%}, Stop: max({breakeven_ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
             else:
                 # Fallback to original logic if no cost basis available
                 exit_price = max(ema, chandelier)
@@ -252,7 +255,7 @@ class TradingManager:
                 logger.debug(f"{market_data.symbol}: Using DEFAULT_CONSERVATIVE strategy (no cost basis). "
                            f"Stop: max({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
             
-            return exit_price, ema, chandelier, strategy
+            return exit_price, ema, breakeven_ema, chandelier, strategy
             
         except Exception as e:
             logger.error(f"Failed to calculate exit price for {market_data.symbol}: {e}")
@@ -326,7 +329,7 @@ class TradingManager:
         # Calculate adaptive exit price
         try:
             current_price = market_data.closes[-1]
-            exit_price, ema, chandelier, strategy = self.calculate_exit_price(
+            exit_price, ema, breakeven_ema, chandelier, strategy = self.calculate_exit_price(
                 market_data, current_price, avg_cost)
             
             # Log the strategy being used and P&L info
@@ -343,8 +346,9 @@ class TradingManager:
             logger.error(f"Failed to calculate exit price for {symbol}: {e}")
             return False
         
-        # Execute order action with strategy info
-        return self.execute_order_action(symbol, quantity, exit_price, ema, chandelier, existing_order, strategy)
+        # Execute order action with strategy info - use appropriate EMA for logging
+        ema_for_logging = breakeven_ema if strategy == "BREAKEVEN_CONSERVATIVE" else ema
+        return self.execute_order_action(symbol, quantity, exit_price, ema_for_logging, chandelier, existing_order, strategy)
     
     def run(self) -> bool:
         """Main execution method"""
