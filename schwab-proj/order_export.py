@@ -282,16 +282,9 @@ class OrderExporter:
             self._save_execution_date(datetime.now(timezone.utc))
             return True
         
-        # Write to CSV
-        success = self.write_orders_to_csv(filled_orders)
-        
-        # Save execution date only if write was successful
-        # Use current time to ensure we don't miss any orders in next run
-        if success:
-            from datetime import timezone
-            self._save_execution_date(datetime.now(timezone.utc))
-        
-        return success
+        # Write to CSV only - execution date is saved by OrderExportManager
+        # after the full pipeline (upload + job trigger) succeeds
+        return self.write_orders_to_csv(filled_orders)
 
 class OrderExportManager:
     """Main manager for the complete export and upload process"""
@@ -362,6 +355,12 @@ class OrderExportManager:
             
             # Delete the CSV file after successful upload and job trigger to prevent duplicates
             self._delete_uploaded_file()
+            
+            # Save execution date only now that the full pipeline has succeeded.
+            # If upload or job trigger failed, we intentionally skip this so the
+            # next run re-fetches the same window and retries the upload.
+            from datetime import timezone
+            self.exporter._save_execution_date(datetime.now(timezone.utc))
             
             logger.info("Order export and upload completed successfully")
             return True
