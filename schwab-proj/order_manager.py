@@ -4,8 +4,12 @@ from schwab.orders.common import OrderType, Duration
 from schwab.orders.equities import equity_sell_limit
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+import json
 import logging
-from typing import List, Dict, Optional, Tuple
+import os
+import tempfile
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple, Any
 from dataclasses import dataclass
 
 from config import load_trading_config, setup_logging, load_logging_config, validate_environment
@@ -78,6 +82,11 @@ class TechnicalIndicators:
         
         return highest_high - multiplier * atr
 
+
+def _avg_cost_epsilon(avg_cost: float) -> float:
+    return max(1e-6, abs(avg_cost) * 1e-9)
+
+
 class TradingManager:
     """Main trading logic manager"""
     
@@ -85,6 +94,97 @@ class TradingManager:
         self.config = config
         self.client = self._initialize_client()
         self.account_hash = self._get_account_hash()
+        self._peak_state: Dict[str, Dict[str, Any]] = {}
+    
+    def _resolved_peak_state_path(self) -> Path:
+        p = Path(self.config.peak_state_path)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        return p
+    
+    def _load_peak_state(self) -> Dict[str, Dict[str, Any]]:
+        path = self._resolved_peak_state_path()
+        if not path.exists():
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                return {}
+            out: Dict[str, Dict[str, Any]] = {}
+            for sym, row in raw.items():
+                if isinstance(row, dict) and "avg_cost" in row:
+                    peak = row.get("peak_pnl_pct")
+                    out[sym] = {
+                        "avg_cost": float(row["avg_cost"]),
+                        "peak_pnl_pct": None if peak is None else float(peak),
+                    }
+            return out
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
+            logger.warning(f"Could not load peak state from {path}: {e}")
+            return {}
+    
+    def _save_peak_state(self, state: Dict[str, Dict[str, Any]]) -> None:
+        path = self._resolved_peak_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp_path, path)
+        except OSError as e:
+            logger.error(f"Failed to save peak state to {path}: {e}")
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    
+    @staticmethod
+    def _held_equity_symbols(positions: List[Dict]) -> set:
+        held = set()
+        for p in positions:
+            if p.get("instrument", {}).get("assetType") == "COLLECTIVE_INVESTMENT":
+                continue
+            sym = p.get("instrument", {}).get("symbol")
+            if not sym:
+                continue
+            qty = p.get("longQuantity", 0) - p.get("shortQuantity", 0)
+            if qty > 0:
+                held.add(sym)
+        return held
+    
+    def _prune_peak_state(self, state: Dict[str, Dict[str, Any]], positions: List[Dict]) -> None:
+        held = self._held_equity_symbols(positions)
+        for sym in list(state.keys()):
+            if sym not in held:
+                del state[sym]
+    
+    def _merge_peak_for_symbol(
+        self,
+        symbol: str,
+        avg_cost: float,
+        unrealized_pnl_pct: float,
+    ) -> Optional[float]:
+        """Update self._peak_state for symbol; return peak_pnl_pct for exit math (None if not armed)."""
+        eps = _avg_cost_epsilon(avg_cost)
+        row = self._peak_state.get(symbol)
+        if row and abs(row["avg_cost"] - avg_cost) > eps:
+            row = None
+        
+        act = self.config.giveback_activation_pct
+        if row is None:
+            peak = unrealized_pnl_pct if unrealized_pnl_pct >= act else None
+        elif row.get("peak_pnl_pct") is None:
+            peak = unrealized_pnl_pct if unrealized_pnl_pct >= act else None
+        else:
+            peak = max(row["peak_pnl_pct"], unrealized_pnl_pct)
+        
+        self._peak_state[symbol] = {"avg_cost": avg_cost, "peak_pnl_pct": peak}
+        if peak is None or peak + 1e-15 < act:
+            return None
+        return peak
         
     def _initialize_client(self):
         """Initialize Schwab client with error handling"""
@@ -206,9 +306,19 @@ class TradingManager:
             None
         )
     
-    def calculate_exit_price(self, market_data: MarketData, current_price: float = None,
-                           avg_cost: float = None) -> Tuple[float, float, float, float, str]:
-        """Calculate adaptive exit price based on position P&L"""
+    def calculate_exit_price(
+        self,
+        market_data: MarketData,
+        current_price: float = None,
+        avg_cost: float = None,
+        peak_pnl_pct: Optional[float] = None,
+    ) -> Tuple[float, float, float, float, str, Optional[float]]:
+        """Calculate adaptive exit price based on position P&L.
+
+        When peak_pnl_pct is armed (>= giveback_activation_pct), WINNER_TRAILING uses
+        max(profit_floor, min(ema, chandelier)) with profit_floor from peak giveback.
+        Returns profit_floor_price (or None) as the last tuple element for logging.
+        """
         try:
             # Calculate base indicators
             ema = TechnicalIndicators.exponential_moving_average(
@@ -223,15 +333,36 @@ class TradingManager:
                 current_price = market_data.closes[-1]
             
             # Adaptive logic based on position P&L
+            profit_floor_price: Optional[float] = None
             if avg_cost is not None:
                 unrealized_pnl_pct = (current_price - avg_cost) / avg_cost
                 
                 if unrealized_pnl_pct >= self.config.profit_threshold:
-                    # Winning trade - use aggressive trailing stop (lower of the two)
-                    exit_price = min(ema, chandelier)
-                    strategy = "WINNER_TRAILING"
-                    logger.debug(f"{market_data.symbol}: Using WINNER_TRAILING strategy. "
-                               f"P&L: {unrealized_pnl_pct:.1%}, Stop: min({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
+                    trail = min(ema, chandelier)
+                    if (
+                        peak_pnl_pct is not None
+                        and peak_pnl_pct + 1e-15 >= self.config.giveback_activation_pct
+                    ):
+                        profit_floor_price = avg_cost * (
+                            1 + peak_pnl_pct * (1 - self.config.giveback_pct)
+                        )
+                        exit_price = max(profit_floor_price, trail)
+                        if profit_floor_price > trail + 1e-10:
+                            strategy = "WINNER_TRAILING_GIVEBACK"
+                        else:
+                            strategy = "WINNER_TRAILING"
+                        logger.debug(
+                            f"{market_data.symbol}: Using {strategy}. P&L: {unrealized_pnl_pct:.1%}, "
+                            f"peak={peak_pnl_pct:.2%}, floor={profit_floor_price:.2f}, "
+                            f"trail=min({ema:.2f},{chandelier:.2f})={trail:.2f} -> stop={exit_price:.2f}"
+                        )
+                    else:
+                        exit_price = trail
+                        strategy = "WINNER_TRAILING"
+                        logger.debug(
+                            f"{market_data.symbol}: Using WINNER_TRAILING strategy. "
+                            f"P&L: {unrealized_pnl_pct:.1%}, Stop: min({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}"
+                        )
                     
                 elif unrealized_pnl_pct <= self.config.loss_threshold:
                     # Losing trade - cut losses early with tight stop
@@ -255,7 +386,7 @@ class TradingManager:
                 logger.debug(f"{market_data.symbol}: Using DEFAULT_CONSERVATIVE strategy (no cost basis). "
                            f"Stop: max({ema:.2f}, {chandelier:.2f}) = {exit_price:.2f}")
             
-            return exit_price, ema, breakeven_ema, chandelier, strategy
+            return exit_price, ema, breakeven_ema, chandelier, strategy, profit_floor_price
             
         except Exception as e:
             logger.error(f"Failed to calculate exit price for {market_data.symbol}: {e}")
@@ -329,16 +460,35 @@ class TradingManager:
         # Calculate adaptive exit price
         try:
             current_price = market_data.closes[-1]
-            exit_price, ema, breakeven_ema, chandelier, strategy = self.calculate_exit_price(
-                market_data, current_price, avg_cost)
+            peak_for_exit: Optional[float] = None
+            if avg_cost is not None:
+                pnl_pct = (current_price - avg_cost) / avg_cost
+                peak_for_exit = self._merge_peak_for_symbol(symbol, avg_cost, pnl_pct)
+            exit_price, ema, breakeven_ema, chandelier, strategy, profit_floor = (
+                self.calculate_exit_price(
+                    market_data, current_price, avg_cost, peak_for_exit
+                )
+            )
             
             # Log the strategy being used and P&L info
             if avg_cost:
                 pnl_pct = (current_price - avg_cost) / avg_cost
                 unrealized_pnl = (current_price - avg_cost) * quantity
-                logger.info(f"{symbol}: Strategy={strategy}, P&L={pnl_pct:.1%} (${unrealized_pnl:.2f}), "
-                           f"Current=${current_price:.2f}, Avg_Cost=${avg_cost:.2f}, "
-                           f"Stop=${exit_price:.2f}")
+                peak_part = (
+                    f", peak_pnl={peak_for_exit:.2%}"
+                    + (
+                        f", profit_floor=${profit_floor:.2f}"
+                        if profit_floor is not None
+                        else ""
+                    )
+                    if peak_for_exit is not None
+                    else ""
+                )
+                logger.info(
+                    f"{symbol}: Strategy={strategy}, P&L={pnl_pct:.1%} (${unrealized_pnl:.2f}), "
+                    f"Current=${current_price:.2f}, Avg_Cost=${avg_cost:.2f}, "
+                    f"Stop=${exit_price:.2f}{peak_part}"
+                )
             else:
                 logger.info(f"{symbol}: Strategy={strategy}, Current=${current_price:.2f}, Stop=${exit_price:.2f}")
         
@@ -355,6 +505,7 @@ class TradingManager:
         logger.info("Starting trading manager")
         
         try:
+            self._peak_state = self._load_peak_state()
             # Get positions and orders
             positions = self.get_positions()
             open_orders = self.get_open_orders()
@@ -365,6 +516,9 @@ class TradingManager:
                     success_count += 1
                 else:
                     logger.error(f"Failed to process {symbol}")
+            
+            self._prune_peak_state(self._peak_state, positions)
+            self._save_peak_state(self._peak_state)
             
             logger.info(f"Successfully processed {success_count}/{len(self.config.tickers)} symbols")
             return success_count == len(self.config.tickers)

@@ -5,15 +5,11 @@ A comprehensive Python project for automating Schwab trading operations, includi
 ## 🚀 Features
 
 ### Trading Automation (`order_manager.py`)
-- **OAuth2 Authentication** with Schwab API
-- **Portfolio Management**: Retrieve account positions and open orders
-- **Technical Indicators**:
-  - 20-day Simple Moving Average (SMA)
-  - 10-day Exponential Moving Average (EMA)
-  - 14-day Average True Range (ATR)
-  - Chandelier Exit stop calculations
-- **Automated Stop-Loss Management**: Place/replace orders based on technical analysis
-- **Dry-Run Mode**: Test strategies without executing trades
+- **OAuth2** with Schwab API; reads positions and open orders
+- **Indicators**: SMA, EMA, ATR (e.g. for Chandelier Exit), EMA of lows for breakeven-style stops
+- **Adaptive stops**: Profit / loss / breakeven branches; winner trailing uses `min(EMA, Chandelier)`
+- **Peak giveback floor**: After a configurable gain threshold, persists peak unrealized return and raises the stop to at least a fraction of that peak (JSON state file)
+- **Dry-run** via `DRY_RUN=true`
 
 ### Order Export & Data Pipeline (`order_export.py`)
 - **Incremental Data Export**: Tracks last execution date for efficient extraction
@@ -21,7 +17,7 @@ A comprehensive Python project for automating Schwab trading operations, includi
 - **Databricks Integration**: Automatic file upload and job triggering
 - **Smart Skipping**: Skip uploads when no new orders found
 - **CSV Export**: Clean, structured data format
-- **Robust Error Handling**: Comprehensive logging and retry logic
+- **Logging**: Structured logs for export and API errors
 
 ### Historical Data Processing (`transform_history.py`)
 - **CSV Transformation**: Convert historical trading data to standardized format
@@ -44,8 +40,7 @@ A comprehensive Python project for automating Schwab trading operations, includi
 
 ### 1. Installation
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/schwab-trading-automation.git
+git clone <your-repo-url>
 cd schwab-trading-automation
 
 # Create virtual environment
@@ -56,28 +51,21 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Environment Configuration
-Create a `.env` file in the project root:
+### 2. Environment configuration
+
+Create **`schwab-proj/.env`** (see [SETUP.md](SETUP.md)). Scripts use `load_dotenv()` from the **current working directory**, so run `order_export.py` / `order_manager.py` from `schwab-proj` unless you manage `.env` elsewhere.
+
+Minimal Schwab variables:
 
 ```bash
-# Schwab API Configuration
 SCHWAB_CLIENT_ID=your_client_id_here
 SCHWAB_CLIENT_SECRET=your_client_secret_here
 CALLBACK_URL=https://127.0.0.1:8182/callback
-
-# Optional: Custom paths and settings
-TOKEN_PATH=token.json
-OUTPUT_FILE=filled_orders.csv
-CUTOFF_DATE=2024-06-15T00:00:00+00:00
-
-# Databricks Configuration (for data pipeline features)
-DATABRICKS_PROFILE=mypharos
-DATABRICKS_REMOTE_PATH=/Volumes/workspace/default/landing/filled_orders.csv
-DATABRICKS_JOB_ID=939121727711316
-
-# Optional: Logging configuration
-LOG_LEVEL=INFO
 ```
+
+**Trading** (`order_manager.py`) also requires **`TICKERS`** (comma-separated), e.g. `TICKERS=AAPL,MSFT`. Optional: `DRY_RUN=true`, `TOKEN_PATH`, indicator and giveback variables (see Configuration below and `config.py`).
+
+**Export** optional keys: `OUTPUT_FILE`, `CUTOFF_DATE`, `DATABRICKS_*`, logging keys as in [SETUP.md](SETUP.md).
 
 ### 3. Databricks Setup (Optional)
 If using data pipeline features:
@@ -131,24 +119,31 @@ python3 order_manager.py
 - Risk management controls
 - Dry-run mode for testing
 
-## 📁 Project Structure
+## Project structure
+
+Typical layout when you work from **`schwab-proj/`** (recommended):
 
 ```
 schwab-trading-automation/
-├── requirements.txt          # Package dependencies
-├── SETUP.md                 # Detailed setup guide  
-├── readme.md               # This file
-├── .env                    # Environment variables (create this)
+├── requirements.txt
+├── SETUP.md
+├── readme.md
+├── LICENSE
 ├── schwab-proj/
-│   ├── config.py           # Configuration management
-│   ├── order_export.py     # Order export & Databricks pipeline
-│   ├── order_manager.py    # Trading automation
-│   ├── transform_history.py # Historical data processing
-│   └── token.json          # Schwab API token (auto-generated)
-├── last_execution.json     # Execution state tracking (auto-generated)
-├── filled_orders.csv       # Export output (auto-generated)
-└── historical_orders.csv   # Historical data output (auto-generated)
+│   ├── .env                    # Create here (gitignored)
+│   ├── config.py
+│   ├── order_export.py
+│   ├── order_manager.py
+│   ├── transform_history.py
+│   ├── token.json              # OAuth token (auto-generated)
+│   ├── peak_state.json         # Peak P&L for giveback (auto-generated)
+│   ├── last_execution.json     # Export incremental state (auto-generated)
+│   ├── filled_orders.csv       # Export output
+│   ├── order_export.log
+│   └── trading.log
 ```
+
+Paths for `token.json`, logs, CSVs, and state files follow the **process working directory** (defaults above assume `cd schwab-proj` before running Python).
 
 ## 🔧 Configuration
 
@@ -156,38 +151,39 @@ schwab-trading-automation/
 1. Register for Schwab Developer API access
 2. Create an application to get Client ID and Secret
 3. Set callback URL to `https://127.0.0.1:8182/callback`
-4. Add credentials to `.env` file
+4. Add credentials to `schwab-proj/.env` (or the cwd you run from)
 
-### Trading Configuration
-Customize technical indicators and risk parameters in `config.py`:
+### Trading configuration
+
+Defaults and env overrides live in `schwab-proj/config.py` (`TradingConfig` / `load_trading_config`). Examples:
 
 ```python
-# Technical indicator parameters
 sma_period: int = 20
 ema_period: int = 10
+breakeven_ema_period: int = 5
 atr_period: int = 14
 chandelier_period: int = 22
 chandelier_multiplier: float = 3.0
-
-# Risk management
-max_position_size: float = 10000.0
-max_daily_trades: int = 10
-min_price: float = 1.0
+profit_threshold: float = 0.05
+loss_threshold: float = -0.03
+max_loss_percent: float = 0.05
 ```
+
+Peak profit giveback (optional env overrides; see `config.py` defaults):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GIVEBACK_PCT` | `0.25` | Fraction of peak **gain** you may give back; stop floor uses `peak * (1 - GIVEBACK_PCT)` in return space. |
+| `GIVEBACK_ACTIVATION_PCT` | `0.20` | Arm peak tracking once unrealized P&L reaches this return. |
+| `PEAK_STATE_PATH` | `peak_state.json` | JSON file (created next to the process working directory) storing per-symbol `avg_cost` and `peak_pnl_pct` across runs. |
+
+The order manager prunes this file when you no longer hold a symbol; average-cost drift beyond a small epsilon resets the peak for that lot.
 
 ## 📊 Data Pipeline Features
 
-### Incremental Execution
-The order export maintains state in `last_execution.json`:
+### Incremental execution
 
-```json
-{
-  "last_execution_date": "2024-08-15T16:36:12.129000",
-  "last_updated": "2024-08-15T16:36:15.312000"
-}
-```
-
-Each run extracts only orders from the last execution date to current time, making it efficient for regular scheduled runs.
+`order_export.py` stores the last successful export window in **`last_execution.json`** next to the script (same cwd rules as other generated files). Each run fetches orders after that timestamp through now.
 
 ### Databricks Integration
 Automatically:
@@ -200,10 +196,9 @@ Perfect for append-based data pipelines.
 
 ## 🚨 Important Notes
 
-### API Limitations
-- **Schwab API**: Only provides orders from last 60 days
-- **Rate Limits**: Built-in retry logic respects API limits
-- **Authentication**: Token auto-refresh handled automatically
+### API limitations
+- **Schwab**: Order history is limited to roughly the last **60 days** (Schwab API constraint).
+- **Authentication**: Token refresh is handled by **schwab-py** once `token.json` exists; delete it to re-authenticate.
 
 ### Data Pipeline Considerations
 - First run extracts maximum available data (60 days)
@@ -223,9 +218,9 @@ Perfect for append-based data pipelines.
    ```
 
 2. **Schwab authentication issues**
-   - Verify Client ID and Secret in `.env`
-   - Check callback URL matches registration
-   - Delete `token.json` to force re-authentication
+   - Confirm `.env` is in `schwab-proj` (or cwd) and contains Client ID, Secret, and callback URL
+   - Callback URL must match your Schwab developer app
+   - Delete `schwab-proj/token.json` (or your `TOKEN_PATH`) to force a new OAuth flow
 
 3. **Databricks connection issues**
    ```bash
@@ -234,36 +229,18 @@ Perfect for append-based data pipelines.
    ```
 
 ### Logs
-Check these files for debugging:
-- `order_export.log` - Export operations and API calls
-- `trading.log` - Trading operations and technical analysis
 
-## 📈 Performance
+With default logging, files are created in the **current working directory** (e.g. `schwab-proj/order_export.log`, `schwab-proj/trading.log`).
 
-### Typical Performance Metrics
-- **Order Export**: ~2-3 minutes for 60 days of data
-- **Historical Processing**: ~1 second for 200 transactions
-- **Databricks Upload**: ~10-15 seconds per file
-- **API Calls**: Respects rate limits with exponential backoff
+## Security
 
-## 🛡️ Security
+- Store Schwab tokens in `token.json` (gitignored) and secrets only in `.env` (gitignored).
+- API traffic uses HTTPS; OAuth2 is handled by **schwab-py**.
 
-- **Token Storage**: Schwab tokens stored locally in `token.json`
-- **Environment Variables**: Sensitive data in `.env` (never committed)
-- **HTTPS**: All API communications use HTTPS
-- **OAuth2**: Industry-standard authentication flow
+## License
 
-## 📝 License
+This project is licensed under the MIT License; see [LICENSE](LICENSE).
 
-[Add your license information here]
+## Issues
 
-## 🤝 Contributing
-
-[Add contributing guidelines here]
-
-## 📞 Support
-
-For issues and questions:
-- Check the troubleshooting section above
-- Review logs for detailed error messages
-- Ensure all environment variables are properly set
+Use your repository’s issue tracker. For local failures, check the troubleshooting section and the log files named above.

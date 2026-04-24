@@ -57,6 +57,11 @@ class TradingConfig(SchwabAPIConfig):
     max_loss_percent: float = 0.05  # 5% maximum loss per position
     breakeven_buffer: float = 0.01  # 1% buffer around breakeven
     
+    # Peak profit giveback (persisted in peak_state_path)
+    giveback_pct: float = 0.25  # floor uses peak_pnl * (1 - giveback_pct) of peak gain
+    giveback_activation_pct: float = 0.20  # arm peak tracking once up this much
+    peak_state_path: str = "peak_state.json"
+    
     def __post_init__(self):
         super().__post_init__()
         if self.tickers is None:
@@ -73,6 +78,10 @@ class TradingConfig(SchwabAPIConfig):
             raise ValueError("ATR period must be positive")
         if self.chandelier_period <= 0:
             raise ValueError("Chandelier period must be positive")
+        if not (0 < self.giveback_pct < 1):
+            raise ValueError("giveback_pct must be between 0 and 1")
+        if self.giveback_activation_pct <= 0:
+            raise ValueError("giveback_activation_pct must be positive")
 
 
 @dataclass
@@ -165,7 +174,11 @@ def load_trading_config() -> TradingConfig:
         profit_threshold=float(os.getenv("PROFIT_THRESHOLD", "0.05")),
         loss_threshold=float(os.getenv("LOSS_THRESHOLD", "-0.03")),
         max_loss_percent=float(os.getenv("MAX_LOSS_PERCENT", "0.05")),
-        breakeven_buffer=float(os.getenv("BREAKEVEN_BUFFER", "0.01"))
+        breakeven_buffer=float(os.getenv("BREAKEVEN_BUFFER", "0.01")),
+        
+        giveback_pct=float(os.getenv("GIVEBACK_PCT", "0.25")),
+        giveback_activation_pct=float(os.getenv("GIVEBACK_ACTIVATION_PCT", "0.20")),
+        peak_state_path=os.getenv("PEAK_STATE_PATH", "peak_state.json"),
     )
 
 

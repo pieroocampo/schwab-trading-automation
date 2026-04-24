@@ -3,5 +3,6 @@ token.json
 filled_orders.csv
 IMPROVEMENTS.md
 last_execution.json
+peak_state.json
 *.log
 *.pyc
