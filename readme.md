@@ -78,46 +78,57 @@ databricks auth login --host https://your-databricks-workspace.cloud.databricks.
 databricks auth profiles
 ```
 
-## 📖 Usage
+## Usage
 
-### Order Export (Data Pipeline)
-Export recent filled orders to CSV and upload to Databricks:
+All Python entry points expect you to run from **`schwab-proj`** so `.env`, `token.json`, and generated files resolve consistently:
+
+```bash
+cd schwab-trading-automation/schwab-proj
+source ../.venv/bin/activate   # if you created the venv at the repo root
+python3 …
+```
+
+### `order_export.py`
+
+Fetches **filled** equity orders from Schwab since the last successful run, appends to `OUTPUT_FILE` (default `filled_orders.csv`), then—if that file contains new rows—uploads it to Databricks and triggers `DATABRICKS_JOB_ID`. On full success it may remove the local CSV and updates **`last_execution.json`**; if upload or job fails, the checkpoint is **not** advanced so the next run retries the same window.
+
+**Required in `.env`:** `SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, `CALLBACK_URL` (same as other scripts).
+
+**For Databricks upload + job:** `DATABRICKS_PROFILE`, `DATABRICKS_REMOTE_PATH`, `DATABRICKS_JOB_ID` must match a working CLI profile and workspace. If there are no new orders, the script exits successfully and skips upload.
 
 ```bash
 cd schwab-proj
 python3 order_export.py
 ```
 
-**Features:**
-- ✅ Incremental extraction (only new orders since last run)
-- ✅ Automatic Databricks upload when orders found
-- ✅ Skip upload when no new orders
-- ✅ Comprehensive logging
+Exit code **0** on success, **1** on validation failure, export failure, or Databricks failure.
 
-### Historical Data Processing
-Transform historical trade data to match the export format:
+### `order_manager.py`
 
-```bash
-cd schwab-proj
-python3 transform_history.py
-```
+For each symbol in **`TICKERS`** (comma-separated, required), loads positions and daily price history, computes adaptive stop levels, then **places or replaces** a GTC stop-loss sell for the full long quantity. Uses **`token.json`** (OAuth with `interactive=False` in code—you need a valid token file; obtain one via **schwab-py** / Schwab’s flow if missing).
 
-**Input:** `history.csv` (your historical trade data)  
-**Output:** `historical_orders.csv` (Databricks-ready format)
+**Required in `.env`:** Schwab trio above plus **`TICKERS`** (e.g. `TICKERS=AAPL,MSFT`).
 
-### Trading Automation
-Run automated stop-loss management:
+**Recommended for testing:** `DRY_RUN=true` (logs actions without placing orders).
 
 ```bash
 cd schwab-proj
 python3 order_manager.py
 ```
 
-**Features:**
-- Technical indicator calculations
-- Automated order placement/replacement
-- Risk management controls
-- Dry-run mode for testing
+Writes **`peak_state.json`** (and logs) under the same cwd. Exit **0** only if every configured ticker was processed without error.
+
+### `transform_history.py`
+
+Does **not** call Schwab. Reads **`history.csv`** in the current directory (default), writes **`historical_orders.csv`** in the export schema for offline / bulk loads.
+
+```bash
+cd schwab-proj
+# put your broker export as history.csv here (or adjust paths in code)
+python3 transform_history.py
+```
+
+Exit **0** if at least one valid stock trade row was written; **1** if the run failed or no valid rows were found.
 
 ## Project structure
 
