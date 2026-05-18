@@ -12,6 +12,11 @@ from typing import List, Optional
 from dotenv import load_dotenv
 
 
+def _parse_csv_env(name: str) -> List[str]:
+    raw = os.getenv(name, "")
+    return [value.strip().upper() for value in raw.split(",") if value.strip()]
+
+
 @dataclass
 class SchwabAPIConfig:
     """Base configuration for Schwab API access"""
@@ -35,6 +40,7 @@ class TradingConfig(SchwabAPIConfig):
     """Configuration for trading operations"""
     # Trading parameters
     tickers: List[str] = None
+    ignored_tickers: List[str] = None
     dry_run: bool = False
     debug: bool = False
     
@@ -66,6 +72,8 @@ class TradingConfig(SchwabAPIConfig):
         super().__post_init__()
         if self.tickers is None:
             self.tickers = []
+        if self.ignored_tickers is None:
+            self.ignored_tickers = []
         
         # Validate technical indicator periods
         if self.sma_period <= 0:
@@ -144,16 +152,13 @@ def load_trading_config() -> TradingConfig:
     """Load trading configuration from environment variables"""
     load_dotenv()
     
-    # Parse tickers from comma-separated string
-    tickers_str = os.getenv("TICKERS")
-    tickers = [ticker.strip() for ticker in tickers_str.split(",") if ticker.strip()]
-    
     return TradingConfig(
         client_id=os.getenv("SCHWAB_CLIENT_ID"),
         client_secret=os.getenv("SCHWAB_CLIENT_SECRET"),
         callback_url=os.getenv("CALLBACK_URL"),
         token_path=os.getenv("TOKEN_PATH", "token.json"),
-        tickers=tickers,
+        tickers=_parse_csv_env("TICKERS"),
+        ignored_tickers=_parse_csv_env("IGNORED_TICKERS"),
         dry_run=os.getenv("DRY_RUN", "false").lower() == "true",
         debug=os.getenv("DEBUG", "false").lower() == "true",
         

@@ -7,10 +7,12 @@ from zoneinfo import ZoneInfo
 import json
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 from dataclasses import dataclass
+from dotenv import find_dotenv, set_key
 
 from config import load_trading_config, setup_logging, load_logging_config, validate_environment
 
@@ -95,6 +97,66 @@ class TradingManager:
         self.client = self._initialize_client()
         self.account_hash = self._get_account_hash()
         self._peak_state: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _sorted_symbols(symbols: List[str]) -> List[str]:
+        return sorted({symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()})
+
+    def _env_path(self) -> Path:
+        local_env = Path(__file__).resolve().with_name(".env")
+        if local_env.exists():
+            return local_env
+        env_path = find_dotenv(usecwd=True)
+        if env_path:
+            return Path(env_path)
+        return local_env
+
+    def _persist_env_symbol_list(self, env_var: str, symbols: List[str]) -> None:
+        env_path = self._env_path()
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        if not env_path.exists():
+            env_path.touch()
+        set_key(str(env_path), env_var, ",".join(self._sorted_symbols(symbols)), quote_mode="never")
+
+    def _prompt_unknown_positions(self, positions: List[Dict]) -> None:
+        held_symbols = self._held_equity_symbols(positions)
+        known_tickers = set(self._sorted_symbols(self.config.tickers))
+        ignored_tickers = set(self._sorted_symbols(self.config.ignored_tickers))
+        unknown_symbols = sorted(held_symbols - known_tickers - ignored_tickers)
+
+        if not unknown_symbols:
+            return
+
+        if not sys.stdin.isatty():
+            logger.info(
+                "Found held symbols not in TICKERS but no interactive terminal is available: "
+                + ", ".join(unknown_symbols)
+            )
+            return
+
+        updated_tickers = list(known_tickers)
+        updated_ignored = list(ignored_tickers)
+
+        for symbol in unknown_symbols:
+            while True:
+                answer = input(
+                    f"{symbol} is currently held but not listed in TICKERS. Add it to .env? [y/N]: "
+                ).strip().lower()
+                if answer in ("", "n", "no"):
+                    updated_ignored.append(symbol)
+                    logger.info(f"{symbol}: recorded as ignored for future runs.")
+                    break
+                if answer in ("y", "yes"):
+                    updated_tickers.append(symbol)
+                    updated_ignored = [item for item in updated_ignored if item != symbol]
+                    logger.info(f"{symbol}: added to TICKERS.")
+                    break
+                print("Please answer y or n.")
+
+        self.config.tickers = self._sorted_symbols(updated_tickers)
+        self.config.ignored_tickers = self._sorted_symbols(updated_ignored)
+        self._persist_env_symbol_list("TICKERS", self.config.tickers)
+        self._persist_env_symbol_list("IGNORED_TICKERS", self.config.ignored_tickers)
     
     def _resolved_peak_state_path(self) -> Path:
         p = Path(self.config.peak_state_path)
@@ -508,6 +570,7 @@ class TradingManager:
             self._peak_state = self._load_peak_state()
             # Get positions and orders
             positions = self.get_positions()
+            self._prompt_unknown_positions(positions)
             open_orders = self.get_open_orders()
             
             success_count = 0
