@@ -157,6 +157,22 @@ class TradingManager:
         self.config.ignored_tickers = self._sorted_symbols(updated_ignored)
         self._persist_env_symbol_list("TICKERS", self.config.tickers)
         self._persist_env_symbol_list("IGNORED_TICKERS", self.config.ignored_tickers)
+
+    def _prune_unheld_tickers(self, positions: List[Dict]) -> None:
+        """Remove TICKERS entries for symbols that are no longer held."""
+        held_symbols = self._held_equity_symbols(positions)
+        current_tickers = self._sorted_symbols(self.config.tickers)
+        pruned = [symbol for symbol in current_tickers if symbol not in held_symbols]
+
+        if not pruned:
+            return
+
+        remaining = [symbol for symbol in current_tickers if symbol in held_symbols]
+        self.config.tickers = remaining
+        self._persist_env_symbol_list("TICKERS", self.config.tickers)
+        logger.info(
+            "Removed unheld symbols from TICKERS in .env: " + ", ".join(pruned)
+        )
     
     def _resolved_peak_state_path(self) -> Path:
         p = Path(self.config.peak_state_path)
@@ -571,6 +587,7 @@ class TradingManager:
             # Get positions and orders
             positions = self.get_positions()
             self._prompt_unknown_positions(positions)
+            self._prune_unheld_tickers(positions)
             open_orders = self.get_open_orders()
             
             success_count = 0
